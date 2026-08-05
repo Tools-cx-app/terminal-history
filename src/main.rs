@@ -1,6 +1,7 @@
 mod cli;
 mod history;
 mod shell;
+mod tui;
 
 use std::error::Error;
 

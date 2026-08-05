@@ -29,7 +29,7 @@ pub enum Command {
         #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(i64).range(0..))]
         offset: i64,
     },
-    /// Interactively select a command, using fzf when available.
+    /// Interactively select a command.
     #[command(hide = true)]
     Pick {
         #[arg(long, default_value = "")]

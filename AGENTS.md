@@ -11,10 +11,11 @@
 
 ## Architecture
 
-- `src/main.rs` only dispatches Clap commands. Keep argument definitions in `src/cli.rs`, Turso access and history behavior in `src/history.rs`, and generated shell code in `src/shell.rs`.
+- `src/main.rs` only dispatches Clap commands. Keep argument definitions in `src/cli.rs`, Turso access and history behavior in `src/history.rs`, the Ratatui selector in `src/tui.rs`, and generated shell code in `src/shell.rs`.
 - `list` and `search` pull Turso Cloud changes before reading; `add` and `recall` deliberately avoid a pull because shell hooks and arrow navigation are latency-sensitive. Writes push when remote sync is configured.
 - History is scoped to the exact shell-provided `PWD` by default, preserving symlink paths. `--all` is the explicit cross-directory path.
-- `pick` uses `TERMINAL_HISTORY_SELECTOR` (default `fzf`) and falls back to the newest match if the selector cannot start.
+- Commands are intentionally not unique: every execution is a row. `executed_at` is a unique nanosecond timestamp; `SCHEMA` migrates legacy second timestamps before creating its unique index.
+- `pick` uses the built-in Ratatui selector by default. `TERMINAL_HISTORY_SELECTOR` explicitly opts into an external selector; if it cannot start, the newest match is returned.
 
 ## Change Hazards
 

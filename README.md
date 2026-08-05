@@ -43,6 +43,8 @@ source ~/.cache/terminal-history.nu
 
 Hook 会保留已有 Shell hook，并在命令完成后异步写入命令、时间、工作目录、Shell、
 主机名、退出码和耗时。Bash 原生 history 不提供可靠耗时，因此其耗时为空。
+命令文本允许重复；每次执行都会保留独立记录。执行时间使用唯一纳秒时间戳，极端
+碰撞时会在数据库内递增 `1ns`。
 生成的初始化脚本会记录当前 `terminal-history` 可执行文件的绝对路径，因此从项目内
 运行 `target/debug/terminal-history init nu` 也不要求该命令已加入 `PATH`。移动或重新
 安装二进制后需要重新生成初始化脚本。键绑定产生的 `commandline edit`、`pick`、
@@ -52,8 +54,12 @@ Hook 会保留已有 Shell hook，并在命令完成后异步写入命令、时�
 
 | 按键 | 行为 |
 | --- | --- |
-| `Ctrl-R` | 交互搜索当前目录的历史；已安装 `fzf` 时使用 `fzf`，否则选取最近匹配项 |
+| `Ctrl-R` | 使用内置 Ratatui 界面交互搜索当前目录的历史 |
 | `↑` / `↓` | 根据当前命令行前缀浏览当前目录的历史 |
+
+Ratatui 选择器中可直接输入关键词过滤；`↑` / `↓` 或 `PageUp` / `PageDown` 移动，
+`Enter` 选择，`Esc` 或 `Ctrl-C` 取消，`Ctrl-U` 清空查询。记录按纳秒时间戳从新到旧
+排序；宽终端显示本地执行时间，窄终端自动隐藏时间列。
 
 可在执行 `terminal-history init ...` 前覆盖按键。不同 Shell 沿用自身的按键表示法：
 
@@ -73,8 +79,8 @@ set -gx TERMINAL_HISTORY_SEARCH_KEY '\cx'
 $env.TERMINAL_HISTORY_SEARCH_KEY = 'char_x'
 ```
 
-同样可设置 `TERMINAL_HISTORY_UP_KEY`、`TERMINAL_HISTORY_DOWN_KEY`。选择器命令可通过
-`TERMINAL_HISTORY_SELECTOR` 修改，默认是 `fzf`。
+同样可设置 `TERMINAL_HISTORY_UP_KEY`、`TERMINAL_HISTORY_DOWN_KEY`。默认选择器不依赖
+`fzf`；如需使用外部选择器，可设置 `TERMINAL_HISTORY_SELECTOR=fzf`。
 
 ## CLI
 

@@ -187,7 +187,9 @@ pub async fn recall(prefix: &str, offset: i64) -> Result<()> {
 pub async fn pick(query: &str) -> Result<()> {
     let db = Db::open(true).await?;
     let sql = format!(
-        "SELECT command FROM history
+        "SELECT command, executed_at,
+                strftime('%m-%d %H:%M:%S', executed_at / 1000000000, 'unixepoch', 'localtime')
+         FROM history
          WHERE cwd = ?1
            {HIDE_INTERNAL}
          ORDER BY executed_at DESC
@@ -197,17 +199,21 @@ pub async fn pick(query: &str) -> Result<()> {
         .conn
         .query(&sql, params![pwd()?.to_string_lossy()])
         .await?;
-    let mut commands = Vec::new();
+    let mut entries = Vec::new();
     while let Some(row) = rows.next().await? {
-        commands.push(row.get::<String>(0)?);
+        entries.push(tui::Entry {
+            command: row.get(0)?,
+            executed_at: row.get(1)?,
+            display_time: row.get(2)?,
+        });
     }
-    if commands.is_empty() {
+    if entries.is_empty() {
         return Ok(());
     }
 
     let Ok(selector) = env::var("TERMINAL_HISTORY_SELECTOR") else {
-        if let Some(command) = tui::pick(&commands, query)? {
-            print!("{command}");
+        if let Some(entry) = tui::pick(&entries, query)? {
+            print!("{}", entry.command);
         }
         return Ok(());
     };
@@ -224,8 +230,8 @@ pub async fn pick(query: &str) -> Result<()> {
         .stdout(Stdio::piped())
         .spawn()
     else {
-        if let Some(command) = tui::newest_match(&commands, query) {
-            print!("{command}");
+        if let Some(entry) = tui::newest_match(&entries, query) {
+            print!("{}", entry.command);
         }
         return Ok(());
     };
@@ -234,8 +240,8 @@ pub async fn pick(query: &str) -> Result<()> {
             .stdin
             .as_mut()
             .ok_or("selector stdin is unavailable")?;
-        for command in &commands {
-            stdin.write_all(command.as_bytes())?;
+        for entry in &entries {
+            stdin.write_all(entry.command.as_bytes())?;
             stdin.write_all(&[0])?;
         }
     }
