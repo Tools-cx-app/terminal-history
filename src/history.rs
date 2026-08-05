@@ -11,6 +11,7 @@ use turso::{Connection, params};
 use crate::{
     Result,
     cli::{AddArgs, FilterArgs},
+    tui,
 };
 
 const SCHEMA: &str = "
@@ -24,8 +25,12 @@ CREATE TABLE IF NOT EXISTS history (
     exit_status INTEGER,
     duration_ms INTEGER
 );
-CREATE INDEX IF NOT EXISTS history_executed_at ON history(executed_at DESC);
 CREATE INDEX IF NOT EXISTS history_cwd_executed_at ON history(cwd, executed_at DESC);
+UPDATE history
+SET executed_at = executed_at * 1000000000 + id
+WHERE executed_at < 1000000000000000;
+DROP INDEX IF EXISTS history_executed_at;
+CREATE UNIQUE INDEX IF NOT EXISTS history_executed_at_unique ON history(executed_at DESC);
 ";
 
 const HIDE_INTERNAL: &str = "
@@ -87,16 +92,20 @@ pub async fn add(args: AddArgs) -> Result<()> {
         .hostname
         .or_else(|| env::var("HOSTNAME").ok())
         .unwrap_or_default();
-    let timestamp = args
-        .timestamp
-        .unwrap_or(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64);
+    let timestamp = args.timestamp.unwrap_or(i64::try_from(
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos(),
+    )?);
 
     let db = Db::open(false).await?;
     db.conn
         .execute(
             "INSERT INTO history
              (command, executed_at, cwd, shell, hostname, exit_status, duration_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             VALUES (
+                 ?1,
+                 (SELECT max(?2, COALESCE(MAX(executed_at) + 1, ?2)) FROM history),
+                 ?3, ?4, ?5, ?6, ?7
+             )",
             params![
                 args.command,
                 timestamp,
@@ -120,7 +129,8 @@ pub async fn list(filter: FilterArgs, query: Option<String>) -> Result<()> {
     let pattern = query.map(|value| format!("%{value}%"));
     let db = Db::open(true).await?;
     let sql = format!(
-        "SELECT datetime(executed_at, 'unixepoch', 'localtime'), cwd, command,
+        "SELECT strftime('%Y-%m-%d %H:%M:%S', executed_at / 1000000000, 'unixepoch', 'localtime')
+                || printf('.%09d', executed_at % 1000000000), cwd, command,
                 exit_status, duration_ms
          FROM history
          WHERE (?1 IS NULL OR command LIKE ?1)
@@ -154,7 +164,7 @@ pub async fn recall(prefix: &str, offset: i64) -> Result<()> {
         "SELECT command FROM history
          WHERE cwd = ?1 AND command LIKE ?2 ESCAPE '\\'
            {HIDE_INTERNAL}
-         GROUP BY command ORDER BY MAX(executed_at) DESC, MAX(id) DESC
+         ORDER BY executed_at DESC
          LIMIT 1 OFFSET ?3"
     );
     let mut rows = db
@@ -178,30 +188,29 @@ pub async fn pick(query: &str) -> Result<()> {
     let db = Db::open(true).await?;
     let sql = format!(
         "SELECT command FROM history
-         WHERE cwd = ?1 AND command LIKE ?2 ESCAPE '\\'
+         WHERE cwd = ?1
            {HIDE_INTERNAL}
-         GROUP BY command ORDER BY MAX(executed_at) DESC, MAX(id) DESC
+         ORDER BY executed_at DESC
          LIMIT 1000"
     );
     let mut rows = db
         .conn
-        .query(
-            &sql,
-            params![
-                pwd()?.to_string_lossy(),
-                format!("%{}%", escape_like(query))
-            ],
-        )
+        .query(&sql, params![pwd()?.to_string_lossy()])
         .await?;
     let mut commands = Vec::new();
     while let Some(row) = rows.next().await? {
         commands.push(row.get::<String>(0)?);
     }
-    let Some(first) = commands.first() else {
+    if commands.is_empty() {
+        return Ok(());
+    }
+
+    let Ok(selector) = env::var("TERMINAL_HISTORY_SELECTOR") else {
+        if let Some(command) = tui::pick(&commands, query)? {
+            print!("{command}");
+        }
         return Ok(());
     };
-
-    let selector = env::var("TERMINAL_HISTORY_SELECTOR").unwrap_or_else(|_| "fzf".into());
     let Ok(mut child) = ProcessCommand::new(selector)
         .args([
             "--read0",
@@ -215,7 +224,9 @@ pub async fn pick(query: &str) -> Result<()> {
         .stdout(Stdio::piped())
         .spawn()
     else {
-        print!("{first}");
+        if let Some(command) = tui::newest_match(&commands, query) {
+            print!("{command}");
+        }
         return Ok(());
     };
     {
@@ -301,5 +312,70 @@ mod tests {
             "let selected = (^/tmp/terminal-history recall --prefix git)"
         ));
         assert!(!is_internal_command("cargo test"));
+    }
+
+    #[tokio::test]
+    async fn schema_keeps_duplicate_commands_with_unique_times() {
+        let db = turso::Builder::new_local(":memory:").build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute_batch(SCHEMA).await.unwrap();
+        for _ in 0..2 {
+            conn.execute(
+                "INSERT INTO history
+                 (command, executed_at, cwd, shell, hostname)
+                 VALUES ('same', (SELECT COALESCE(MAX(executed_at) + 1, 1) FROM history), '/', 'test', '')",
+                (),
+            )
+            .await
+            .unwrap();
+        }
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*), COUNT(DISTINCT executed_at) FROM history WHERE command = 'same'",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), 2);
+        assert_eq!(row.get::<i64>(1).unwrap(), 2);
+    }
+
+    #[tokio::test]
+    async fn schema_migrates_duplicate_second_timestamps() {
+        let db = turso::Builder::new_local(":memory:").build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                command TEXT NOT NULL,
+                executed_at INTEGER NOT NULL,
+                cwd TEXT NOT NULL,
+                shell TEXT NOT NULL,
+                hostname TEXT NOT NULL,
+                exit_status INTEGER,
+                duration_ms INTEGER
+             );
+             CREATE INDEX history_executed_at ON history(executed_at DESC);
+             INSERT INTO history (command, executed_at, cwd, shell, hostname)
+             VALUES ('same', 1700000000, '/', 'test', ''),
+                    ('same', 1700000000, '/', 'test', '');",
+        )
+        .await
+        .unwrap();
+
+        conn.execute_batch(SCHEMA).await.unwrap();
+        let mut rows = conn
+            .query(
+                "SELECT COUNT(*), COUNT(DISTINCT executed_at), MIN(executed_at)
+                 FROM history",
+                (),
+            )
+            .await
+            .unwrap();
+        let row = rows.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), 2);
+        assert_eq!(row.get::<i64>(1).unwrap(), 2);
+        assert!(row.get::<i64>(2).unwrap() >= 1_700_000_000_000_000_000);
     }
 }
