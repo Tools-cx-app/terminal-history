@@ -1,17 +1,18 @@
 use std::io::{self, IsTerminal};
 
 use crossterm::{
+    cursor,
     event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     execute,
-    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{self, ClearType},
 };
 use ratatui::{
-    Terminal,
+    Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
     layout::{Alignment, Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Borders, List, ListItem, ListState, Padding, Paragraph},
+    widgets::{List, ListItem, ListState, Paragraph},
 };
 
 use crate::Result;
@@ -103,16 +104,23 @@ struct Screen {
 
 impl Screen {
     fn open() -> Result<Self> {
+        let (_, terminal_height) = terminal::size()?;
         terminal::enable_raw_mode()?;
         let mut output = io::stderr();
-        if let Err(error) = execute!(output, EnterAlternateScreen) {
+        if let Err(error) = execute!(output, cursor::MoveToNextLine(1), cursor::Hide) {
             terminal::disable_raw_mode()?;
             return Err(error.into());
         }
-        let terminal = match Terminal::new(CrosstermBackend::new(output)) {
+        let height = (terminal_height * 2 / 5).clamp(5, 14);
+        let terminal = match Terminal::with_options(
+            CrosstermBackend::new(output),
+            TerminalOptions {
+                viewport: Viewport::Inline(height),
+            },
+        ) {
             Ok(terminal) => terminal,
             Err(error) => {
-                let _ = execute!(io::stderr(), LeaveAlternateScreen);
+                let _ = execute!(io::stderr(), cursor::Show);
                 terminal::disable_raw_mode()?;
                 return Err(error.into());
             }
@@ -123,68 +131,39 @@ impl Screen {
     fn draw(&mut self, query: &str, matches: &[&Entry], selected: usize) -> Result<()> {
         self.terminal.draw(|frame| {
             let area = frame.area();
-            let compact = area.width < 72 || area.height < 12;
-            let [header, search, results, help] = Layout::vertical([
-                Constraint::Length(if compact { 1 } else { 2 }),
-                Constraint::Length(3),
+            let compact = area.width < 64;
+            let [search, results, help] = Layout::vertical([
+                Constraint::Length(1),
                 Constraint::Min(1),
-                Constraint::Length(if compact { 1 } else { 2 }),
+                Constraint::Length(1),
             ])
             .areas(area);
 
+            let [input, count] = Layout::horizontal([
+                Constraint::Min(1),
+                Constraint::Length(matches.len().to_string().len() as u16 + 9),
+            ])
+            .areas(search);
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled(
-                        " TERMINAL ",
-                        Style::new()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        " HISTORY",
-                        Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        "  newest first",
-                        Style::new()
-                            .fg(Color::DarkGray)
-                            .add_modifier(Modifier::ITALIC),
-                    ),
-                ])),
-                header,
-            );
-
-            frame.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(" > ", Style::new().fg(Color::Cyan)),
+                    Span::styled("history> ", Style::new().fg(Color::Cyan)),
                     Span::raw(query),
                     Span::styled(" ", Style::new().bg(Color::Gray)),
-                ]))
-                .block(
-                    Block::new()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
-                        .border_style(Style::new().fg(Color::DarkGray))
-                        .title(" Filter ")
-                        .title_style(Style::new().fg(Color::Cyan)),
-                ),
-                search,
+                ])),
+                input,
+            );
+            frame.render_widget(
+                Paragraph::new(format!("{} matches", matches.len()))
+                    .alignment(Alignment::Right)
+                    .style(Style::new().fg(Color::DarkGray)),
+                count,
             );
 
-            let results_block = Block::new()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::new().fg(Color::DarkGray))
-                .title(format!(" History - {} matches ", matches.len()))
-                .title_style(Style::new().fg(Color::Yellow))
-                .padding(Padding::horizontal(1));
             if matches.is_empty() {
                 frame.render_widget(
                     Paragraph::new("No matching commands")
                         .alignment(Alignment::Center)
-                        .style(Style::new().fg(Color::DarkGray))
-                        .block(results_block),
+                        .style(Style::new().fg(Color::DarkGray)),
                     results,
                 );
             } else {
@@ -205,14 +184,8 @@ impl Screen {
                     ListItem::new(line).style(Style::new().fg(Color::White))
                 });
                 let list = List::new(items)
-                    .block(results_block)
                     .highlight_symbol("▸ ")
-                    .highlight_style(
-                        Style::new()
-                            .fg(Color::Black)
-                            .bg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    );
+                    .highlight_style(Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD));
                 let mut state = ListState::default().with_selected(Some(selected));
                 frame.render_stateful_widget(list, results, &mut state);
             }
@@ -224,21 +197,23 @@ impl Screen {
             };
             let help_line = if compact {
                 Line::from(vec![
-                    Span::styled(" Enter ", key_style()),
-                    Span::raw("select  "),
-                    Span::styled(" Esc ", key_style()),
-                    Span::raw("cancel  "),
+                    Span::styled("↑↓", key_style()),
+                    Span::raw(" move  "),
+                    Span::styled("enter", key_style()),
+                    Span::raw(" select  "),
+                    Span::styled("esc", key_style()),
+                    Span::raw(" cancel  "),
                     Span::styled(position, Style::new().fg(Color::DarkGray)),
                 ])
             } else {
                 Line::from(vec![
-                    Span::styled(" ↑↓ ", key_style()),
+                    Span::styled("↑↓/pgup/pgdn", key_style()),
                     Span::raw("move  "),
-                    Span::styled(" Enter ", key_style()),
+                    Span::styled("enter", key_style()),
                     Span::raw("select  "),
-                    Span::styled(" Esc ", key_style()),
+                    Span::styled("esc", key_style()),
                     Span::raw("cancel  "),
-                    Span::styled(" Ctrl-U ", key_style()),
+                    Span::styled("ctrl-u", key_style()),
                     Span::raw("clear  "),
                     Span::styled(position, Style::new().fg(Color::DarkGray)),
                 ])
@@ -250,14 +225,19 @@ impl Screen {
 }
 
 fn key_style() -> Style {
-    Style::new().fg(Color::Black).bg(Color::DarkGray)
+    Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)
 }
 
 impl Drop for Screen {
     fn drop(&mut self) {
-        let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+        let _ = self.terminal.clear();
+        let _ = execute!(
+            self.terminal.backend_mut(),
+            cursor::MoveToColumn(0),
+            terminal::Clear(ClearType::FromCursorDown),
+            cursor::Show
+        );
         let _ = terminal::disable_raw_mode();
-        let _ = self.terminal.show_cursor();
     }
 }
 

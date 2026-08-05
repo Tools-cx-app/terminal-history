@@ -16,6 +16,7 @@
 - History is scoped to the exact shell-provided `PWD` by default, preserving symlink paths. `--all` is the explicit cross-directory path.
 - Commands are intentionally not unique: every execution is a row. `executed_at` is a unique nanosecond timestamp; `SCHEMA` migrates legacy second timestamps before creating its unique index.
 - `pick` uses the built-in Ratatui selector by default. `TERMINAL_HISTORY_SELECTOR` explicitly opts into an external selector; if it cannot start, the newest match is returned.
+- The Ratatui inline viewport renders only to stderr; stdout must contain only the selected command because shell widgets capture it with command substitution.
 
 ## Change Hazards
 
