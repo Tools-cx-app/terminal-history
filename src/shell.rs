@@ -19,19 +19,60 @@ pub fn print_init(shell: Shell) -> Result<()> {
 }
 
 const BASH: &str = r#"__terminal_history_bin=__TERMINAL_HISTORY_BIN__
+__terminal_history_ready=0
+__terminal_history_initialized=0
 __terminal_history_last=$HISTCMD
+__terminal_history_read_command() {
+    local history_line
+    history_line="$(HISTTIMEFORMAT= builtin history 1)"
+    [[ $history_line =~ ^[[:space:]]*[0-9]+[[:space:]]+(.*)$ ]] && printf '%s' "${BASH_REMATCH[1]}"
+}
+__terminal_history_preexec() {
+    local last_status=$? function_name
+    for function_name in "${FUNCNAME[@]:1}"; do
+        [[ $function_name == __terminal_history_* ]] && return "$last_status"
+    done
+    (( __terminal_history_ready )) || return "$last_status"
+    [[ $BASH_COMMAND == __terminal_history_* ]] && return "$last_status"
+    __terminal_history_ready=0
+    __terminal_history_command="$(__terminal_history_read_command)"
+    __terminal_history_cwd="$PWD"
+    return "$last_status"
+}
 __terminal_history_prompt() {
-    local command_status=$? command
-    if (( HISTCMD != __terminal_history_last )); then
-        command="$(builtin fc -ln -1)"
-        "$__terminal_history_bin" add --command "$command" --cwd "$PWD" --shell bash --status "$command_status" >/dev/null 2>&1 &
+    local prompt_status=$?
+    if (( ! __terminal_history_initialized )); then
+        __terminal_history_initialized=1
         __terminal_history_last=$HISTCMD
+        __terminal_history_ready=1
+        return "$prompt_status"
     fi
+    if [[ -z "$__terminal_history_command" && $HISTCMD != "$__terminal_history_last" ]]; then
+        __terminal_history_command="$(__terminal_history_read_command)"
+        : "${__terminal_history_cwd:=$PWD}"
+    fi
+    if [[ -n "$__terminal_history_command" ]]; then
+        ("$__terminal_history_bin" add --command "$__terminal_history_command" --cwd "$__terminal_history_cwd" --shell bash --status "$__terminal_history_status" >/dev/null 2>&1 &)
+        unset __terminal_history_command __terminal_history_cwd
+    fi
+    __terminal_history_last=$HISTCMD
+    __terminal_history_ready=1
+    return "$prompt_status"
 }
 if [[ ${BASH_VERSINFO[0]} -ge 5 ]]; then
-    PROMPT_COMMAND+=(__terminal_history_prompt)
+    __terminal_history_prompt_commands=()
+    for __terminal_history_item in "${PROMPT_COMMAND[@]}"; do
+        [[ $__terminal_history_item == '__terminal_history_status=$?' || $__terminal_history_item == __terminal_history_prompt ]] || __terminal_history_prompt_commands+=("$__terminal_history_item")
+    done
+    PROMPT_COMMAND=('__terminal_history_status=$?' "${__terminal_history_prompt_commands[@]}" __terminal_history_prompt)
+    unset __terminal_history_prompt_commands __terminal_history_item
 else
-    PROMPT_COMMAND="__terminal_history_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+    PROMPT_COMMAND="__terminal_history_status=\$?${PROMPT_COMMAND:+;$PROMPT_COMMAND};__terminal_history_prompt"
+fi
+if declare -p preexec_functions >/dev/null 2>&1; then
+    [[ " ${preexec_functions[*]} " == *" __terminal_history_preexec "* ]] || preexec_functions+=(__terminal_history_preexec)
+elif [[ -z $(trap -p DEBUG) ]]; then
+    trap '__terminal_history_preexec' DEBUG
 fi
 
 __terminal_history_search() {
@@ -76,6 +117,7 @@ const ZSH: &str = r#"__terminal_history_bin=__TERMINAL_HISTORY_BIN__
 autoload -Uz add-zsh-hook
 zmodload zsh/datetime 2>/dev/null
 __terminal_history_preexec() {
+    [[ -n "$1" ]] || return
     __terminal_history_command="$1"
     __terminal_history_cwd="$PWD"
     __terminal_history_started=${EPOCHREALTIME:-$SECONDS}
@@ -83,11 +125,13 @@ __terminal_history_preexec() {
 __terminal_history_precmd() {
     local command_status=$?
     if [[ -n "$__terminal_history_command" ]]; then
-        local elapsed=$(( (${EPOCHREALTIME:-$SECONDS} - __terminal_history_started) * 1000 ))
+        local elapsed=$(( int((${EPOCHREALTIME:-$SECONDS} - __terminal_history_started) * 1000) ))
         "$__terminal_history_bin" add --command "$__terminal_history_command" --cwd "$__terminal_history_cwd" --shell zsh --status "$command_status" --duration "$elapsed" >/dev/null 2>&1 &
         unset __terminal_history_command
     fi
 }
+add-zsh-hook -d preexec __terminal_history_preexec 2>/dev/null
+add-zsh-hook -d precmd __terminal_history_precmd 2>/dev/null
 add-zsh-hook preexec __terminal_history_preexec
 add-zsh-hook precmd __terminal_history_precmd
 
@@ -135,6 +179,7 @@ bindkey "${TERMINAL_HISTORY_DOWN_KEY:-^[[B}" __terminal_history_down
 
 const FISH: &str = r#"set -g __terminal_history_bin __TERMINAL_HISTORY_BIN__
 function __terminal_history_preexec --on-event fish_preexec
+    test -n "$argv[1]"; or return
     set -g __terminal_history_command $argv[1]
     set -g __terminal_history_cwd $PWD
 end
@@ -187,11 +232,15 @@ bind (set -q TERMINAL_HISTORY_UP_KEY; and echo $TERMINAL_HISTORY_UP_KEY; or echo
 bind (set -q TERMINAL_HISTORY_DOWN_KEY; and echo $TERMINAL_HISTORY_DOWN_KEY; or echo '\e[B') __terminal_history_down
 "#;
 
-const NU: &str = r#"$env.__terminal_history_bin = __TERMINAL_HISTORY_BIN__
+const NU: &str = r#"if not ($env.__terminal_history_loaded? | default false) {
+$env.__terminal_history_bin = __TERMINAL_HISTORY_BIN__
 $env.config = ($env.config
     | upsert hooks.pre_execution (($env.config.hooks.pre_execution? | default []) | append {||
-        $env.__terminal_history_command = (commandline)
-        $env.__terminal_history_cwd = $env.PWD
+        let command = (commandline)
+        if ($command | is-not-empty) {
+            $env.__terminal_history_command = $command
+            $env.__terminal_history_cwd = $env.PWD
+        }
     })
     | upsert hooks.pre_prompt (($env.config.hooks.pre_prompt? | default []) | append {||
         if ($env.__terminal_history_command? | is-not-empty) {
@@ -201,7 +250,9 @@ $env.config = ($env.config
             let duration = ($env.CMD_DURATION_MS? | default 0)
             hide-env __terminal_history_command
             hide-env __terminal_history_cwd
-            ^$env.__terminal_history_bin add --command $command --cwd $cwd --shell nushell --status $status --duration $duration
+            ^$env.__terminal_history_bin add --command $command --cwd $cwd --shell nushell --status $status --duration $duration | complete | ignore
+            $env.LAST_EXIT_CODE = $status
+            $env.CMD_DURATION_MS = $duration
         }
     })
     | upsert keybindings (($env.config.keybindings? | default []) | append [{
@@ -223,4 +274,35 @@ $env.config = ($env.config
         mode: [emacs vi_insert vi_normal]
         event: { send: executehostcommand, cmd: 'if ($env.__terminal_history_offset? | default 0) <= 1 { let prefix = ($env.__terminal_history_prefix? | default ""); commandline edit $prefix; $env.__terminal_history_selected = $prefix; $env.__terminal_history_offset = 0 } else { $env.__terminal_history_offset -= 2; let selected = (^$env.__terminal_history_bin recall --prefix $env.__terminal_history_prefix --offset $env.__terminal_history_offset); commandline edit $selected; $env.__terminal_history_selected = $selected; $env.__terminal_history_offset += 1 }' }
     }]))
+$env.__terminal_history_loaded = true
+}
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_hook_records_command_directory_and_status() {
+        for script in [BASH, ZSH, FISH, NU] {
+            assert!(script.contains("--command"));
+            assert!(script.contains("--cwd"));
+            assert!(script.contains("--shell"));
+            assert!(script.contains("--status"));
+        }
+        for script in [ZSH, FISH, NU] {
+            assert!(script.contains("--duration"));
+        }
+    }
+
+    #[test]
+    fn hooks_append_and_avoid_duplicate_registration() {
+        assert!(BASH.contains("PROMPT_COMMAND=('__terminal_history_status=$?'"));
+        assert!(BASH.contains("__terminal_history_initialized=0"));
+        assert!(ZSH.contains("add-zsh-hook -d preexec"));
+        assert!(FISH.contains("--on-event fish_preexec"));
+        assert!(FISH.contains("--on-event fish_postexec"));
+        assert!(NU.contains("hooks.pre_execution") && NU.contains("| append"));
+        assert!(NU.contains("__terminal_history_loaded"));
+    }
+}

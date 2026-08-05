@@ -43,6 +43,14 @@ source ~/.cache/terminal-history.nu
 
 Hook 会保留已有 Shell hook，并在命令完成后异步写入命令、时间、工作目录、Shell、
 主机名、退出码和耗时。Bash 原生 history 不提供可靠耗时，因此其耗时为空。
+
+| Shell | 开始 hook | 结束 hook | 记录内容 |
+| --- | --- | --- | --- |
+| Bash | `DEBUG` / `preexec_functions` | `PROMPT_COMMAND` | 执行前目录、命令、退出码 |
+| Zsh | `preexec` | `precmd` | 执行前目录、命令、退出码、耗时 |
+| Fish | `fish_preexec` | `fish_postexec` | 执行前目录、命令、退出码、耗时 |
+| Nushell | `pre_execution` | `pre_prompt` | 执行前目录、命令、退出码、耗时 |
+
 命令文本允许重复；每次执行都会保留独立记录。执行时间使用唯一纳秒时间戳，极端
 碰撞时会在数据库内递增 `1ns`。
 生成的初始化脚本会记录当前 `terminal-history` 可执行文件的绝对路径，因此从项目内
