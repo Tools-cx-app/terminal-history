@@ -108,6 +108,9 @@ __terminal_history_down() {
     ((__terminal_history_offset-=2))
     __terminal_history_up
 }
+bind -r "${TERMINAL_HISTORY_SEARCH_KEY:-\\C-r}" 2>/dev/null
+bind -r "${TERMINAL_HISTORY_UP_KEY:-\\e[A}" 2>/dev/null
+bind -r "${TERMINAL_HISTORY_DOWN_KEY:-\\e[B}" 2>/dev/null
 bind -x "\"${TERMINAL_HISTORY_SEARCH_KEY:-\\C-r}\":__terminal_history_search"
 bind -x "\"${TERMINAL_HISTORY_UP_KEY:-\\e[A}\":__terminal_history_up"
 bind -x "\"${TERMINAL_HISTORY_DOWN_KEY:-\\e[B}\":__terminal_history_down"
@@ -172,6 +175,9 @@ __terminal_history_down() {
 zle -N __terminal_history_search
 zle -N __terminal_history_up
 zle -N __terminal_history_down
+bindkey -r "${TERMINAL_HISTORY_SEARCH_KEY:-^R}" 2>/dev/null
+bindkey -r "${TERMINAL_HISTORY_UP_KEY:-^[[A}" 2>/dev/null
+bindkey -r "${TERMINAL_HISTORY_DOWN_KEY:-^[[B}" 2>/dev/null
 bindkey "${TERMINAL_HISTORY_SEARCH_KEY:-^R}" __terminal_history_search
 bindkey "${TERMINAL_HISTORY_UP_KEY:-^[[A}" __terminal_history_up
 bindkey "${TERMINAL_HISTORY_DOWN_KEY:-^[[B}" __terminal_history_down
@@ -227,6 +233,9 @@ function __terminal_history_down
     set -g __terminal_history_offset (math $__terminal_history_offset - 2)
     __terminal_history_up
 end
+bind --erase (set -q TERMINAL_HISTORY_SEARCH_KEY; and echo $TERMINAL_HISTORY_SEARCH_KEY; or echo '\cr') 2>/dev/null
+bind --erase (set -q TERMINAL_HISTORY_UP_KEY; and echo $TERMINAL_HISTORY_UP_KEY; or echo '\e[A') 2>/dev/null
+bind --erase (set -q TERMINAL_HISTORY_DOWN_KEY; and echo $TERMINAL_HISTORY_DOWN_KEY; or echo '\e[B') 2>/dev/null
 bind (set -q TERMINAL_HISTORY_SEARCH_KEY; and echo $TERMINAL_HISTORY_SEARCH_KEY; or echo '\cr') __terminal_history_search
 bind (set -q TERMINAL_HISTORY_UP_KEY; and echo $TERMINAL_HISTORY_UP_KEY; or echo '\e[A') __terminal_history_up
 bind (set -q TERMINAL_HISTORY_DOWN_KEY; and echo $TERMINAL_HISTORY_DOWN_KEY; or echo '\e[B') __terminal_history_down
@@ -255,7 +264,9 @@ $env.config = ($env.config
             $env.CMD_DURATION_MS = $duration
         }
     })
-    | upsert keybindings (($env.config.keybindings? | default []) | append [{
+     | upsert keybindings (($env.config.keybindings? | default [])
+         | where not (($it.modifier == control and $it.keycode == ($env.TERMINAL_HISTORY_SEARCH_KEY? | default char_r)) or ($it.modifier == none and ($it.keycode == ($env.TERMINAL_HISTORY_UP_KEY? | default up) or $it.keycode == ($env.TERMINAL_HISTORY_DOWN_KEY? | default down))))
+         | append [{
         name: terminal_history_search
         modifier: control
         keycode: ($env.TERMINAL_HISTORY_SEARCH_KEY? | default char_r)
@@ -273,7 +284,7 @@ $env.config = ($env.config
         keycode: ($env.TERMINAL_HISTORY_DOWN_KEY? | default down)
         mode: [emacs vi_insert vi_normal]
         event: { send: executehostcommand, cmd: 'if ($env.__terminal_history_offset? | default 0) <= 1 { let prefix = ($env.__terminal_history_prefix? | default ""); commandline edit $prefix; $env.__terminal_history_selected = $prefix; $env.__terminal_history_offset = 0 } else { $env.__terminal_history_offset -= 2; let selected = (^$env.__terminal_history_bin recall --prefix $env.__terminal_history_prefix --offset $env.__terminal_history_offset); commandline edit $selected; $env.__terminal_history_selected = $selected; $env.__terminal_history_offset += 1 }' }
-    }]))
+     }]))
 $env.__terminal_history_loaded = true
 }
 "#;
@@ -304,5 +315,13 @@ mod tests {
         assert!(FISH.contains("--on-event fish_postexec"));
         assert!(NU.contains("hooks.pre_execution") && NU.contains("| append"));
         assert!(NU.contains("__terminal_history_loaded"));
+    }
+
+    #[test]
+    fn history_keys_replace_native_bindings() {
+        assert!(BASH.contains("bind -r"));
+        assert!(ZSH.contains("bindkey -r"));
+        assert!(FISH.contains("bind --erase"));
+        assert!(NU.contains("where not"));
     }
 }
