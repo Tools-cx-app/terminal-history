@@ -100,8 +100,11 @@ terminal-history list --all
 terminal-history search docker --limit 20
 terminal-history search docker --all
 terminal-history add --command 'cargo test' --cwd "$PWD" --shell bash --status 0 --duration 1200
+terminal-history compact
 terminal-history --help
 ```
+
+`compact` 会回收 SQLite 未使用的页面，适合删除或大量迁移历史记录后手动执行；它不会删除任何历史记录。
 
 `list` 和 `search` 默认只查询当前工作目录；传入 `--cwd` 可查询指定目录，`--all`
 可跨目录查询。

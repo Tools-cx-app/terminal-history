@@ -37,6 +37,8 @@ pub enum Command {
     },
     /// Print shell integration code.
     Init { shell: Shell },
+    /// Reclaim unused SQLite pages.
+    Compact,
 }
 
 #[derive(Args)]

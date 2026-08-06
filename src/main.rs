@@ -26,5 +26,6 @@ async fn run() -> Result<()> {
         Command::Recall { prefix, offset } => history::recall(&prefix, offset).await,
         Command::Pick { query } => history::pick(&query).await,
         Command::Init { shell } => shell::print_init(shell),
+        Command::Compact => history::compact().await,
     }
 }

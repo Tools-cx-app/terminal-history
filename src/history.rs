@@ -16,7 +16,7 @@ use crate::{
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS history (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id INTEGER PRIMARY KEY,
     command TEXT NOT NULL,
     executed_at INTEGER NOT NULL,
     cwd TEXT NOT NULL,
@@ -53,7 +53,9 @@ impl Db {
         let path = path.to_string_lossy();
 
         let (conn, remote) = if let Ok(url) = env::var("TURSO_DATABASE_URL") {
-            let mut builder = turso::sync::Builder::new_remote(&path).with_remote_url(url);
+            let mut builder = turso::sync::Builder::new_remote(&path)
+                .with_remote_url(url)
+                .experimental_vacuum(true);
             if let Ok(token) = env::var("TURSO_AUTH_TOKEN") {
                 builder = builder.with_auth_token(token);
             }
@@ -64,7 +66,10 @@ impl Db {
             let conn = db.connect().await?;
             (conn, Some(db))
         } else {
-            let db = turso::Builder::new_local(&path).build().await?;
+            let db = turso::Builder::new_local(&path)
+                .experimental_vacuum(true)
+                .build()
+                .await?;
             (db.connect()?, None)
         };
 
@@ -118,6 +123,12 @@ pub async fn add(args: AddArgs) -> Result<()> {
         )
         .await?;
     db.push().await
+}
+
+pub async fn compact() -> Result<()> {
+    let db = Db::open(false).await?;
+    db.conn.execute_batch("PRAGMA optimize; VACUUM;").await?;
+    Ok(())
 }
 
 pub async fn list(filter: FilterArgs, query: Option<String>) -> Result<()> {
