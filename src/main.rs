@@ -24,6 +24,7 @@ async fn run() -> Result<()> {
         Command::List(filter) => history::list(filter, None).await,
         Command::Search { query, filter } => history::list(filter, Some(query)).await,
         Command::Recall { prefix, offset } => history::recall(&prefix, offset).await,
+        Command::Candidates { prefix } => history::candidates(&prefix).await,
         Command::Pick { query } => history::pick(&query).await,
         Command::Init { shell } => shell::print_init(shell),
         Command::Compact => history::compact().await,

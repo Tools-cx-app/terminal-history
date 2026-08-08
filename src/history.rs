@@ -1,6 +1,6 @@
 use std::{
     env, fs,
-    io::Write,
+    io::{self, Write},
     path::PathBuf,
     process::{Command as ProcessCommand, Stdio},
     time::{SystemTime, UNIX_EPOCH},
@@ -36,8 +36,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS history_executed_at_unique ON history(executed
 const HIDE_INTERNAL: &str = "
 AND command NOT LIKE '%commandline edit%'
 AND command NOT LIKE '%terminal-history add%'
+AND command NOT LIKE '%terminal-history candidates%'
 AND command NOT LIKE '%terminal-history pick%'
 AND command NOT LIKE '%terminal-history recall%'";
+
+const CANDIDATE_LIMIT: i64 = 1000;
 
 struct Db {
     conn: Connection,
@@ -195,6 +198,42 @@ pub async fn recall(prefix: &str, offset: i64) -> Result<()> {
     Ok(())
 }
 
+pub async fn candidates(prefix: &str) -> Result<()> {
+    let db = Db::open(false).await?;
+    let cwd = pwd()?;
+    let commands = matching_commands(&db.conn, &cwd.to_string_lossy(), prefix).await?;
+    write_nul_delimited(io::stdout().lock(), &commands)
+}
+
+async fn matching_commands(conn: &Connection, cwd: &str, prefix: &str) -> Result<Vec<String>> {
+    let sql = format!(
+        "SELECT command FROM history
+         WHERE cwd = ?1 AND command LIKE ?2 ESCAPE '\\'
+           {HIDE_INTERNAL}
+         ORDER BY executed_at DESC
+         LIMIT ?3"
+    );
+    let mut rows = conn
+        .query(
+            &sql,
+            params![cwd, format!("{}%", escape_like(prefix)), CANDIDATE_LIMIT],
+        )
+        .await?;
+    let mut commands = Vec::new();
+    while let Some(row) = rows.next().await? {
+        commands.push(row.get(0)?);
+    }
+    Ok(commands)
+}
+
+fn write_nul_delimited(mut output: impl Write, commands: &[String]) -> Result<()> {
+    for command in commands {
+        output.write_all(command.as_bytes())?;
+        output.write_all(&[0])?;
+    }
+    Ok(())
+}
+
 pub async fn pick(query: &str) -> Result<()> {
     let db = Db::open(true).await?;
     let sql = format!(
@@ -277,6 +316,7 @@ fn is_internal_command(command: &str) -> bool {
     if [
         "commandline edit",
         "terminal-history add",
+        "terminal-history candidates",
         "terminal-history pick",
         "terminal-history recall",
     ]
@@ -394,5 +434,51 @@ mod tests {
         assert_eq!(row.get::<i64>(0).unwrap(), 2);
         assert_eq!(row.get::<i64>(1).unwrap(), 2);
         assert!(row.get::<i64>(2).unwrap() >= 1_700_000_000_000_000_000);
+    }
+
+    #[tokio::test]
+    async fn candidates_preserve_order_duplicates_and_delimiters() {
+        let db = turso::Builder::new_local(":memory:").build().await.unwrap();
+        let conn = db.connect().unwrap();
+        conn.execute_batch(SCHEMA).await.unwrap();
+        for (command, executed_at, cwd) in [
+            ("git status", 10, "/repo"),
+            ("git status", 20, "/repo"),
+            ("git log\n--oneline", 30, "/repo"),
+            ("git%literal", 40, "/repo"),
+            ("terminal-history candidates --prefix git", 50, "/repo"),
+            ("git other", 60, "/other"),
+        ] {
+            conn.execute(
+                "INSERT INTO history
+                 (command, executed_at, cwd, shell, hostname)
+                 VALUES (?1, ?2, ?3, 'test', '')",
+                params![command, executed_at, cwd],
+            )
+            .await
+            .unwrap();
+        }
+
+        let commands = matching_commands(&conn, "/repo", "git").await.unwrap();
+        assert_eq!(
+            commands,
+            [
+                "git%literal",
+                "git log\n--oneline",
+                "git status",
+                "git status"
+            ]
+        );
+        assert_eq!(
+            matching_commands(&conn, "/repo", "git%").await.unwrap(),
+            ["git%literal"]
+        );
+
+        let mut output = Vec::new();
+        write_nul_delimited(&mut output, &commands).unwrap();
+        assert_eq!(
+            output,
+            b"git%literal\0git log\n--oneline\0git status\0git status\0"
+        );
     }
 }
