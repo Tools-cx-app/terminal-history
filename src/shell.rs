@@ -241,7 +241,7 @@ bind (set -q TERMINAL_HISTORY_UP_KEY; and echo $TERMINAL_HISTORY_UP_KEY; or echo
 bind (set -q TERMINAL_HISTORY_DOWN_KEY; and echo $TERMINAL_HISTORY_DOWN_KEY; or echo '\e[B') __terminal_history_down
 "#;
 
-const NU: &str = r#"if not ($env.__terminal_history_loaded? | default false) {
+const NU: &str = r#"if not ($env.config.keybindings? | default [] | any {|binding| $binding.name? == terminal_history_search }) {
 $env.__terminal_history_bin = __TERMINAL_HISTORY_BIN__
 $env.__terminal_history_prefix = ""
 $env.__terminal_history_offset = 0
@@ -288,7 +288,18 @@ $env.config = ($env.config
         mode: [emacs vi_insert vi_normal]
          event: { send: executehostcommand, cmd: 'let offset = ($env.__terminal_history_offset? | default 0); let prefix = ($env.__terminal_history_prefix? | default ""); if $offset <= 1 { commandline edit $prefix; $env.__terminal_history_selected = $prefix; $env.__terminal_history_offset = 0 } else { let next_offset = $offset - 2; let selected = (^$env.__terminal_history_bin recall --prefix $prefix --offset $next_offset); commandline edit $selected; $env.__terminal_history_selected = $selected; $env.__terminal_history_offset = ($next_offset + 1) }' }
      }]))
-$env.__terminal_history_loaded = true
+$env.config.hinter.closure = {|ctx|
+    if $ctx.pos != ($ctx.line | str length) or ($ctx.line | is-empty) {
+        ""
+    } else {
+        let candidate = (^$env.__terminal_history_bin recall --prefix $ctx.line)
+        if ($candidate | is-empty) or not ($candidate | str starts-with $ctx.line) {
+            ""
+        } else {
+            $candidate | str substring ($ctx.line | str length)..
+        }
+    }
+}
 }
 "#;
 
@@ -317,7 +328,7 @@ mod tests {
         assert!(FISH.contains("--on-event fish_preexec"));
         assert!(FISH.contains("--on-event fish_postexec"));
         assert!(NU.contains("hooks.pre_execution") && NU.contains("| append"));
-        assert!(NU.contains("__terminal_history_loaded"));
+        assert!(NU.contains("$binding.name? == terminal_history_search"));
     }
 
     #[test]
@@ -326,5 +337,11 @@ mod tests {
         assert!(ZSH.contains("bindkey -r"));
         assert!(FISH.contains("bind --erase"));
         assert!(NU.contains("where not"));
+    }
+
+    #[test]
+    fn nushell_history_hint_uses_recall() {
+        assert!(NU.contains("$env.config.hinter.closure = {|ctx|"));
+        assert!(NU.contains("recall --prefix $ctx.line"));
     }
 }
