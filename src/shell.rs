@@ -243,6 +243,9 @@ bind (set -q TERMINAL_HISTORY_DOWN_KEY; and echo $TERMINAL_HISTORY_DOWN_KEY; or 
 
 const NU: &str = r#"if not ($env.__terminal_history_loaded? | default false) {
 $env.__terminal_history_bin = __TERMINAL_HISTORY_BIN__
+$env.__terminal_history_prefix = ""
+$env.__terminal_history_offset = 0
+$env.__terminal_history_selected = ""
 $env.config = ($env.config
     | upsert hooks.pre_execution (($env.config.hooks.pre_execution? | default []) | append {||
         let command = (commandline)
@@ -277,13 +280,13 @@ $env.config = ($env.config
         modifier: none
         keycode: ($env.TERMINAL_HISTORY_UP_KEY? | default up)
         mode: [emacs vi_insert vi_normal]
-        event: { send: executehostcommand, cmd: 'let line = (commandline); if $line != ($env.__terminal_history_selected? | default "") { $env.__terminal_history_prefix = $line; $env.__terminal_history_offset = 0 }; let selected = (^$env.__terminal_history_bin recall --prefix $env.__terminal_history_prefix --offset $env.__terminal_history_offset); if ($selected | is-not-empty) { commandline edit $selected; $env.__terminal_history_selected = $selected; $env.__terminal_history_offset += 1 }' }
+         event: { send: executehostcommand, cmd: 'let line = (commandline); let previous = ($env.__terminal_history_selected? | default ""); if $line != $previous { $env.__terminal_history_prefix = $line; $env.__terminal_history_offset = 0 }; let prefix = ($env.__terminal_history_prefix? | default ""); let offset = ($env.__terminal_history_offset? | default 0); let selected = (^$env.__terminal_history_bin recall --prefix $prefix --offset $offset); if ($selected | is-not-empty) { commandline edit $selected; $env.__terminal_history_selected = $selected; $env.__terminal_history_offset = ($offset + 1) }' }
     } {
         name: terminal_history_down
         modifier: none
         keycode: ($env.TERMINAL_HISTORY_DOWN_KEY? | default down)
         mode: [emacs vi_insert vi_normal]
-        event: { send: executehostcommand, cmd: 'if ($env.__terminal_history_offset? | default 0) <= 1 { let prefix = ($env.__terminal_history_prefix? | default ""); commandline edit $prefix; $env.__terminal_history_selected = $prefix; $env.__terminal_history_offset = 0 } else { $env.__terminal_history_offset -= 2; let selected = (^$env.__terminal_history_bin recall --prefix $env.__terminal_history_prefix --offset $env.__terminal_history_offset); commandline edit $selected; $env.__terminal_history_selected = $selected; $env.__terminal_history_offset += 1 }' }
+         event: { send: executehostcommand, cmd: 'let offset = ($env.__terminal_history_offset? | default 0); let prefix = ($env.__terminal_history_prefix? | default ""); if $offset <= 1 { commandline edit $prefix; $env.__terminal_history_selected = $prefix; $env.__terminal_history_offset = 0 } else { let next_offset = $offset - 2; let selected = (^$env.__terminal_history_bin recall --prefix $prefix --offset $next_offset); commandline edit $selected; $env.__terminal_history_selected = $selected; $env.__terminal_history_offset = ($next_offset + 1) }' }
      }]))
 $env.__terminal_history_loaded = true
 }
