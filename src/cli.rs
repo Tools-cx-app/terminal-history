@@ -29,6 +29,12 @@ pub enum Command {
         #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(i64).range(0..))]
         offset: i64,
     },
+    /// Return matching commands for shell integration menus.
+    #[command(hide = true)]
+    Candidates {
+        #[arg(long, default_value = "")]
+        prefix: String,
+    },
     /// Interactively select a command.
     #[command(hide = true)]
     Pick {

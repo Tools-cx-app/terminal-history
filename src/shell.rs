@@ -241,53 +241,99 @@ bind (set -q TERMINAL_HISTORY_UP_KEY; and echo $TERMINAL_HISTORY_UP_KEY; or echo
 bind (set -q TERMINAL_HISTORY_DOWN_KEY; and echo $TERMINAL_HISTORY_DOWN_KEY; or echo '\e[B') __terminal_history_down
 "#;
 
-const NU: &str = r#"if not ($env.config.keybindings? | default [] | any {|binding| $binding.name? == terminal_history_search }) {
+const NU: &str = r#"let __terminal_history_loaded = ($env.config.keybindings? | default [] | any {|binding| $binding.name? == terminal_history_search })
 $env.__terminal_history_bin = __TERMINAL_HISTORY_BIN__
-$env.__terminal_history_prefix = ""
-$env.__terminal_history_offset = 0
-$env.__terminal_history_selected = ""
+if not $__terminal_history_loaded {
+    $env.config = ($env.config
+        | upsert hooks.pre_execution (($env.config.hooks.pre_execution? | default []) | append {||
+            let command = (commandline)
+            if ($command | is-not-empty) {
+                $env.__terminal_history_command = $command
+                $env.__terminal_history_cwd = $env.PWD
+            }
+        })
+        | upsert hooks.pre_prompt (($env.config.hooks.pre_prompt? | default []) | append {||
+            if ($env.__terminal_history_command? | is-not-empty) {
+                let command = $env.__terminal_history_command
+                let cwd = $env.__terminal_history_cwd
+                let status = ($env.LAST_EXIT_CODE? | default 0)
+                let duration = ($env.CMD_DURATION_MS? | default 0)
+                hide-env __terminal_history_command
+                hide-env __terminal_history_cwd
+                ^$env.__terminal_history_bin add --command $command --cwd $cwd --shell nushell --status $status --duration $duration | complete | ignore
+                $env.LAST_EXIT_CODE = $status
+                $env.CMD_DURATION_MS = $duration
+            }
+        }))
+}
 $env.config = ($env.config
-    | upsert hooks.pre_execution (($env.config.hooks.pre_execution? | default []) | append {||
-        let command = (commandline)
-        if ($command | is-not-empty) {
-            $env.__terminal_history_command = $command
-            $env.__terminal_history_cwd = $env.PWD
-        }
-    })
-    | upsert hooks.pre_prompt (($env.config.hooks.pre_prompt? | default []) | append {||
-        if ($env.__terminal_history_command? | is-not-empty) {
-            let command = $env.__terminal_history_command
-            let cwd = $env.__terminal_history_cwd
-            let status = ($env.LAST_EXIT_CODE? | default 0)
-            let duration = ($env.CMD_DURATION_MS? | default 0)
-            hide-env __terminal_history_command
-            hide-env __terminal_history_cwd
-            ^$env.__terminal_history_bin add --command $command --cwd $cwd --shell nushell --status $status --duration $duration | complete | ignore
-            $env.LAST_EXIT_CODE = $status
-            $env.CMD_DURATION_MS = $duration
-        }
-    })
-     | upsert keybindings (($env.config.keybindings? | default [])
-         | where not (($it.modifier == control and $it.keycode == ($env.TERMINAL_HISTORY_SEARCH_KEY? | default char_r)) or ($it.modifier == none and ($it.keycode == ($env.TERMINAL_HISTORY_UP_KEY? | default up) or $it.keycode == ($env.TERMINAL_HISTORY_DOWN_KEY? | default down))))
-         | append [{
-        name: terminal_history_search
-        modifier: control
-        keycode: ($env.TERMINAL_HISTORY_SEARCH_KEY? | default char_r)
-        mode: [emacs vi_insert vi_normal]
-        event: { send: executehostcommand, cmd: 'commandline edit (^$env.__terminal_history_bin pick --query (commandline))' }
-    } {
-        name: terminal_history_up
-        modifier: none
-        keycode: ($env.TERMINAL_HISTORY_UP_KEY? | default up)
-        mode: [emacs vi_insert vi_normal]
-         event: { send: executehostcommand, cmd: 'let line = (commandline); let previous = ($env.__terminal_history_selected? | default ""); if $line != $previous { $env.__terminal_history_prefix = $line; $env.__terminal_history_offset = 0 }; let prefix = ($env.__terminal_history_prefix? | default ""); let offset = ($env.__terminal_history_offset? | default 0); let selected = (^$env.__terminal_history_bin recall --prefix $prefix --offset $offset); if ($selected | is-not-empty) { commandline edit $selected; $env.__terminal_history_selected = $selected; $env.__terminal_history_offset = ($offset + 1) }' }
-    } {
-        name: terminal_history_down
-        modifier: none
-        keycode: ($env.TERMINAL_HISTORY_DOWN_KEY? | default down)
-        mode: [emacs vi_insert vi_normal]
-         event: { send: executehostcommand, cmd: 'let offset = ($env.__terminal_history_offset? | default 0); let prefix = ($env.__terminal_history_prefix? | default ""); if $offset <= 1 { commandline edit $prefix; $env.__terminal_history_selected = $prefix; $env.__terminal_history_offset = 0 } else { let next_offset = $offset - 2; let selected = (^$env.__terminal_history_bin recall --prefix $prefix --offset $next_offset); commandline edit $selected; $env.__terminal_history_selected = $selected; $env.__terminal_history_offset = ($next_offset + 1) }' }
-     }]))
+    | upsert menus (($env.config.menus? | default [])
+        | where not ($it.name? == terminal_history_menu)
+        | append [{
+            name: terminal_history_menu
+            only_buffer_difference: false
+            marker: "history> "
+            type: {
+                layout: list
+                page_size: 10
+            }
+            style: {
+                text: white
+                selected_text: cyan_reverse
+                description_text: yellow
+            }
+            source: {|buffer, position|
+                let output = (^$env.__terminal_history_bin candidates --prefix $buffer | complete)
+                if $output.exit_code != 0 {
+                    []
+                } else {
+                    $output.stdout
+                    | split row (char nul)
+                    | where {|command| $command | is-not-empty }
+                    | each {|command|
+                        {
+                            value: $command
+                            span: { start: 0 end: $position }
+                        }
+                    }
+                }
+            }
+        }])
+    | upsert keybindings (($env.config.keybindings? | default [])
+        | where not (
+            ($it.name? in [terminal_history_search terminal_history_up terminal_history_down]) or
+            ($it.modifier == control and $it.keycode == ($env.TERMINAL_HISTORY_SEARCH_KEY? | default char_r)) or
+            ($it.modifier == none and ($it.keycode == ($env.TERMINAL_HISTORY_UP_KEY? | default up) or $it.keycode == ($env.TERMINAL_HISTORY_DOWN_KEY? | default down)))
+        )
+        | append [{
+            name: terminal_history_search
+            modifier: control
+            keycode: ($env.TERMINAL_HISTORY_SEARCH_KEY? | default char_r)
+            mode: [emacs vi_insert vi_normal]
+            event: { send: executehostcommand, cmd: 'commandline edit (^$env.__terminal_history_bin pick --query (commandline))' }
+        } {
+            name: terminal_history_up
+            modifier: none
+            keycode: ($env.TERMINAL_HISTORY_UP_KEY? | default up)
+            mode: [emacs vi_insert vi_normal]
+            event: {
+                until: [
+                    { send: menu name: terminal_history_menu }
+                    { send: menuup }
+                ]
+            }
+        } {
+            name: terminal_history_down
+            modifier: none
+            keycode: ($env.TERMINAL_HISTORY_DOWN_KEY? | default down)
+            mode: [emacs vi_insert vi_normal]
+            event: {
+                until: [
+                    { send: menudown }
+                    { send: down }
+                ]
+            }
+        }]))
 $env.config.hinter.closure = {|ctx|
     if $ctx.pos != ($ctx.line | str length) or ($ctx.line | is-empty) {
         ""
@@ -299,7 +345,6 @@ $env.config.hinter.closure = {|ctx|
             $candidate | str substring ($ctx.line | str length)..
         }
     }
-}
 }
 "#;
 
@@ -328,7 +373,7 @@ mod tests {
         assert!(FISH.contains("--on-event fish_preexec"));
         assert!(FISH.contains("--on-event fish_postexec"));
         assert!(NU.contains("hooks.pre_execution") && NU.contains("| append"));
-        assert!(NU.contains("$binding.name? == terminal_history_search"));
+        assert!(NU.contains("let __terminal_history_loaded ="));
     }
 
     #[test]
@@ -343,5 +388,24 @@ mod tests {
     fn nushell_history_hint_uses_recall() {
         assert!(NU.contains("$env.config.hinter.closure = {|ctx|"));
         assert!(NU.contains("recall --prefix $ctx.line"));
+    }
+
+    #[test]
+    fn nushell_history_navigation_stays_in_reedline() {
+        assert!(NU.contains("name: terminal_history_menu"));
+        assert!(NU.contains("candidates --prefix $buffer | complete"));
+        assert!(NU.contains("{ send: menu name: terminal_history_menu }"));
+        assert!(NU.contains("{ send: menuup }"));
+        assert!(NU.contains("{ send: menudown }"));
+        assert!(!NU.contains("__terminal_history_offset"));
+        assert!(!NU.contains("__terminal_history_selected"));
+    }
+
+    #[test]
+    fn nushell_menu_and_bindings_are_replaced_idempotently() {
+        assert!(NU.contains("where not ($it.name? == terminal_history_menu)"));
+        assert!(NU.contains(
+            "$it.name? in [terminal_history_search terminal_history_up terminal_history_down]"
+        ));
     }
 }
