@@ -1,4 +1,4 @@
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 
 use crossterm::{
     cursor,
@@ -112,12 +112,14 @@ impl Screen {
             return Err(error.into());
         }
         let height = (terminal_height * 2 / 5).clamp(5, 14);
-        let terminal = match Terminal::with_options(
-            CrosstermBackend::new(output),
-            TerminalOptions {
-                viewport: Viewport::Inline(height),
-            },
-        ) {
+        let terminal = match with_terminal_stdout(|| {
+            Terminal::with_options(
+                CrosstermBackend::new(output),
+                TerminalOptions {
+                    viewport: Viewport::Inline(height),
+                },
+            )
+        }) {
             Ok(terminal) => terminal,
             Err(error) => {
                 let _ = execute!(io::stderr(), cursor::Show);
@@ -230,7 +232,7 @@ fn key_style() -> Style {
 
 impl Drop for Screen {
     fn drop(&mut self) {
-        let _ = self.terminal.clear();
+        let _ = with_terminal_stdout(|| self.terminal.clear());
         let _ = execute!(
             self.terminal.backend_mut(),
             cursor::MoveToColumn(0),
@@ -239,6 +241,37 @@ impl Drop for Screen {
         );
         let _ = terminal::disable_raw_mode();
     }
+}
+
+#[cfg(unix)]
+fn with_terminal_stdout<T>(f: impl FnOnce() -> T) -> T {
+    // Crossterm sends cursor-position queries to stdout, which Ctrl-R captures.
+    struct RestoreStdout(i32);
+
+    impl Drop for RestoreStdout {
+        fn drop(&mut self) {
+            unsafe {
+                libc::dup2(self.0, libc::STDOUT_FILENO);
+                libc::close(self.0);
+            }
+        }
+    }
+
+    let _ = io::stdout().flush();
+    let saved_stdout = unsafe { libc::dup(libc::STDOUT_FILENO) };
+    if saved_stdout < 0 || unsafe { libc::dup2(libc::STDERR_FILENO, libc::STDOUT_FILENO) } < 0 {
+        if saved_stdout >= 0 {
+            unsafe { libc::close(saved_stdout) };
+        }
+        return f();
+    }
+    let _restore = RestoreStdout(saved_stdout);
+    f()
+}
+
+#[cfg(not(unix))]
+fn with_terminal_stdout<T>(f: impl FnOnce() -> T) -> T {
+    f()
 }
 
 #[cfg(test)]

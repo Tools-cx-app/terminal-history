@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 crossterm = "0.29"
+libc = "0.2"
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
 turso = { version = "0.8.0-pre.2", default-features = false, features = ["sync"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
