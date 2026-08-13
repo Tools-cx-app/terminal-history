@@ -248,6 +248,8 @@ if not $__terminal_history_loaded {
         | upsert hooks.pre_execution (($env.config.hooks.pre_execution? | default []) | append {||
             let command = (commandline)
             if ($command | is-not-empty) {
+                hide-env __terminal_history_selected
+                hide-env __terminal_history_offset
                 $env.__terminal_history_command = $command
                 $env.__terminal_history_cwd = $env.PWD
             }
@@ -399,5 +401,15 @@ mod tests {
         assert!(NU.contains(
             "$it.name? in [terminal_history_search terminal_history_up terminal_history_down]"
         ));
+    }
+
+    #[test]
+    fn navigation_state_is_reset_before_recording_a_command() {
+        let pre_execution = NU.find("hooks.pre_execution").unwrap();
+        let pre_prompt = NU.find("hooks.pre_prompt").unwrap();
+        let selected = NU.find("hide-env __terminal_history_selected").unwrap();
+        let offset = NU.find("hide-env __terminal_history_offset").unwrap();
+        assert!(pre_execution < selected && selected < pre_prompt);
+        assert!(pre_execution < offset && offset < pre_prompt);
     }
 }
