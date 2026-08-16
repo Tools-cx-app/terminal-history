@@ -318,13 +318,13 @@ $env.config = ($env.config
             modifier: none
             keycode: ($env.TERMINAL_HISTORY_UP_KEY? | default up)
             mode: [emacs vi_insert vi_normal]
-            event: { send: executehostcommand, cmd: 'let line = (commandline); if ($env.__terminal_history_offset? | is-empty) or ($line != ($env.__terminal_history_selected? | default $line)) { $env.__terminal_history_prefix = $line; $env.__terminal_history_offset = 0; $env.__terminal_history_selected = $line }; let selected = (^$env.__terminal_history_bin recall --prefix $env.__terminal_history_prefix --offset $env.__terminal_history_offset); if ($selected | is-not-empty) { commandline edit $selected; $env.__terminal_history_selected = $selected; $env.__terminal_history_offset = $env.__terminal_history_offset + 1 }' }
+            event: { until: [{ send: menuup } { send: executehostcommand, cmd: 'let line = (commandline); if ($env.__terminal_history_offset? | is-empty) or ($line != ($env.__terminal_history_selected? | default $line)) { $env.__terminal_history_prefix = $line; $env.__terminal_history_offset = 0; $env.__terminal_history_selected = $line }; let selected = (^$env.__terminal_history_bin recall --prefix $env.__terminal_history_prefix --offset $env.__terminal_history_offset); if ($selected | is-not-empty) { commandline edit $selected; $env.__terminal_history_selected = $selected; $env.__terminal_history_offset = $env.__terminal_history_offset + 1 }' }] }
         } {
             name: terminal_history_down
             modifier: none
             keycode: ($env.TERMINAL_HISTORY_DOWN_KEY? | default down)
             mode: [emacs vi_insert vi_normal]
-            event: { send: executehostcommand, cmd: 'if ($env.__terminal_history_offset? | is-not-empty) { let offset = $env.__terminal_history_offset; if $offset <= 1 { commandline edit ($env.__terminal_history_prefix? | default ""); hide-env __terminal_history_selected; hide-env __terminal_history_offset } else { let next_offset = $offset - 2; let prefix = ($env.__terminal_history_prefix? | default ""); let selected = (^$env.__terminal_history_bin recall --prefix $prefix --offset $next_offset); if ($selected | is-not-empty) { commandline edit $selected; $env.__terminal_history_selected = $selected; $env.__terminal_history_offset = $next_offset + 1 } } }' }
+            event: { until: [{ send: menudown } { send: executehostcommand, cmd: 'if ($env.__terminal_history_offset? | is-not-empty) { let offset = $env.__terminal_history_offset; if $offset <= 1 { commandline edit ($env.__terminal_history_prefix? | default ""); hide-env __terminal_history_selected; hide-env __terminal_history_offset } else { let next_offset = $offset - 2; let prefix = ($env.__terminal_history_prefix? | default ""); let selected = (^$env.__terminal_history_bin recall --prefix $prefix --offset $next_offset); if ($selected | is-not-empty) { commandline edit $selected; $env.__terminal_history_selected = $selected; $env.__terminal_history_offset = $next_offset + 1 } } }' }] }
         }]))
 $env.config.hinter.closure = {|ctx|
     if $ctx.pos != ($ctx.line | str length) or ($ctx.line | is-empty) {
@@ -389,8 +389,8 @@ mod tests {
         assert!(NU.contains("send: executehostcommand"));
         assert!(NU.contains("recall --prefix"));
         assert!(NU.contains("--offset"));
-        assert!(!NU.contains("{ send: menuup }"));
-        assert!(!NU.contains("{ send: menudown }"));
+        assert!(NU.contains("until: [{ send: menuup }"));
+        assert!(NU.contains("until: [{ send: menudown }"));
         assert!(NU.contains("__terminal_history_offset"));
         assert!(NU.contains("__terminal_history_selected"));
     }
