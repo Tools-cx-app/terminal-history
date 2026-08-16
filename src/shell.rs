@@ -248,8 +248,12 @@ if not $__terminal_history_loaded {
         | upsert hooks.pre_execution (($env.config.hooks.pre_execution? | default []) | append {||
             let command = (commandline)
             if ($command | is-not-empty) {
-                hide-env __terminal_history_selected
-                hide-env __terminal_history_offset
+                if ($env.__terminal_history_selected? | is-not-empty) {
+                    hide-env __terminal_history_selected
+                }
+                if ($env.__terminal_history_offset? | is-not-empty) {
+                    hide-env __terminal_history_offset
+                }
                 $env.__terminal_history_command = $command
                 $env.__terminal_history_cwd = $env.PWD
             }
@@ -411,5 +415,15 @@ mod tests {
         let offset = NU.find("hide-env __terminal_history_offset").unwrap();
         assert!(pre_execution < selected && selected < pre_prompt);
         assert!(pre_execution < offset && offset < pre_prompt);
+    }
+
+    #[test]
+    fn nushell_only_hides_existing_navigation_state() {
+        assert!(NU.contains(
+            "if ($env.__terminal_history_selected? | is-not-empty) {\n                    hide-env __terminal_history_selected"
+        ));
+        assert!(NU.contains(
+            "if ($env.__terminal_history_offset? | is-not-empty) {\n                    hide-env __terminal_history_offset"
+        ));
     }
 }
