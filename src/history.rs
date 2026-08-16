@@ -1,7 +1,7 @@
 use std::{
     env, fs,
     io::{self, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -313,7 +313,7 @@ fn escape_like(value: &str) -> String {
 }
 
 fn is_internal_command(command: &str) -> bool {
-    if [
+    [
         "commandline edit",
         "terminal-history add",
         "terminal-history candidates",
@@ -322,18 +322,12 @@ fn is_internal_command(command: &str) -> bool {
     ]
     .iter()
     .any(|internal| command.contains(internal))
-    {
-        return true;
-    }
-    let executable = command
-        .split_whitespace()
-        .next()
-        .unwrap_or_default()
-        .trim_start_matches('^');
-    PathBuf::from(executable)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| matches!(name, "terminal-history" | "commandline"))
+        || command.split_whitespace().next().is_some_and(|executable| {
+            Path::new(executable.trim_start_matches('^'))
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| matches!(name, "terminal-history" | "commandline"))
+        })
 }
 
 fn database_path() -> Result<PathBuf> {
