@@ -248,12 +248,6 @@ if not $__terminal_history_loaded {
         | upsert hooks.pre_execution (($env.config.hooks.pre_execution? | default []) | append {||
             let command = (commandline)
             if ($command | is-not-empty) {
-                if ($env.__terminal_history_selected? | is-not-empty) {
-                    hide-env __terminal_history_selected
-                }
-                if ($env.__terminal_history_offset? | is-not-empty) {
-                    hide-env __terminal_history_offset
-                }
                 $env.__terminal_history_command = $command
                 $env.__terminal_history_cwd = $env.PWD
             }
@@ -322,13 +316,13 @@ $env.config = ($env.config
             modifier: none
             keycode: ($env.TERMINAL_HISTORY_UP_KEY? | default up)
             mode: [emacs vi_insert vi_normal]
-            event: { until: [{ send: menuup } { send: executehostcommand, cmd: 'let line = (commandline); if ($env.__terminal_history_offset? | is-empty) or ($line != ($env.__terminal_history_selected? | default $line)) { $env.__terminal_history_prefix = $line; $env.__terminal_history_offset = 0; $env.__terminal_history_selected = $line }; let selected = (^$env.__terminal_history_bin recall --prefix $env.__terminal_history_prefix --offset $env.__terminal_history_offset); if ($selected | is-not-empty) { commandline edit $selected; $env.__terminal_history_selected = $selected; $env.__terminal_history_offset = $env.__terminal_history_offset + 1 }' }] }
+            event: { until: [{ send: menu name: terminal_history_menu } { send: menuup }] }
         } {
             name: terminal_history_down
             modifier: none
             keycode: ($env.TERMINAL_HISTORY_DOWN_KEY? | default down)
             mode: [emacs vi_insert vi_normal]
-            event: { until: [{ send: menudown } { send: executehostcommand, cmd: 'if ($env.__terminal_history_offset? | is-not-empty) { let offset = $env.__terminal_history_offset; if $offset <= 1 { commandline edit ($env.__terminal_history_prefix? | default ""); hide-env __terminal_history_selected; hide-env __terminal_history_offset } else { let next_offset = $offset - 2; let prefix = ($env.__terminal_history_prefix? | default ""); let selected = (^$env.__terminal_history_bin recall --prefix $prefix --offset $next_offset); if ($selected | is-not-empty) { commandline edit $selected; $env.__terminal_history_selected = $selected; $env.__terminal_history_offset = $next_offset + 1 } } }' }] }
+            event: { until: [{ send: menudown } { send: down }] }
         }]))
 $env.config.hinter.closure = {|ctx|
     if $ctx.pos != ($ctx.line | str length) or ($ctx.line | is-empty) {
@@ -390,13 +384,10 @@ mod tests {
     fn nushell_history_navigation_stays_in_reedline() {
         assert!(NU.contains("name: terminal_history_menu"));
         assert!(NU.contains("candidates --prefix $buffer | complete"));
-        assert!(NU.contains("send: executehostcommand"));
-        assert!(NU.contains("recall --prefix"));
-        assert!(NU.contains("--offset"));
-        assert!(NU.contains("until: [{ send: menuup }"));
-        assert!(NU.contains("until: [{ send: menudown }"));
-        assert!(NU.contains("__terminal_history_offset"));
-        assert!(NU.contains("__terminal_history_selected"));
+        assert!(
+            NU.contains("until: [{ send: menu name: terminal_history_menu } { send: menuup }]")
+        );
+        assert!(NU.contains("until: [{ send: menudown } { send: down }]"));
     }
 
     #[test]
@@ -404,26 +395,6 @@ mod tests {
         assert!(NU.contains("where not ($it.name? == terminal_history_menu)"));
         assert!(NU.contains(
             "$it.name? in [terminal_history_search terminal_history_up terminal_history_down]"
-        ));
-    }
-
-    #[test]
-    fn navigation_state_is_reset_before_recording_a_command() {
-        let pre_execution = NU.find("hooks.pre_execution").unwrap();
-        let pre_prompt = NU.find("hooks.pre_prompt").unwrap();
-        let selected = NU.find("hide-env __terminal_history_selected").unwrap();
-        let offset = NU.find("hide-env __terminal_history_offset").unwrap();
-        assert!(pre_execution < selected && selected < pre_prompt);
-        assert!(pre_execution < offset && offset < pre_prompt);
-    }
-
-    #[test]
-    fn nushell_only_hides_existing_navigation_state() {
-        assert!(NU.contains(
-            "if ($env.__terminal_history_selected? | is-not-empty) {\n                    hide-env __terminal_history_selected"
-        ));
-        assert!(NU.contains(
-            "if ($env.__terminal_history_offset? | is-not-empty) {\n                    hide-env __terminal_history_offset"
         ));
     }
 }
