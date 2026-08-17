@@ -1,8 +1,12 @@
-use std::io::{self, IsTerminal, Write};
+use std::{
+    io::{self, IsTerminal, Write},
+    sync::mpsc::{Receiver, TryRecvError},
+    time::{Duration, Instant},
+};
 
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     execute,
     terminal::{self, ClearType},
 };
@@ -24,19 +28,33 @@ pub struct Entry {
     pub display_time: String,
 }
 
-pub fn pick(entries: &[Entry], initial_query: &str) -> Result<Option<Entry>> {
-    let entries = sorted(entries);
+pub fn pick(
+    receiver: Receiver<std::result::Result<Vec<Entry>, String>>,
+    initial_query: &str,
+) -> Result<Option<Entry>> {
     if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        let entries = receiver.recv()?.map_err(io::Error::other)?;
         return Ok(newest_match(&entries, initial_query).cloned());
     }
 
     let mut screen = Screen::open()?;
-    let mut query = initial_query.to_owned();
-    let mut selected = 0;
+    let mut picker = Picker::new(initial_query);
+    let started = Instant::now();
     loop {
-        let matches = matching(&entries, &query);
-        selected = selected.min(matches.len().saturating_sub(1));
-        screen.draw(&query, &matches, selected)?;
+        match receiver.try_recv() {
+            Ok(Ok(entries)) if entries.is_empty() => return Ok(None),
+            Ok(result) => picker.finish_loading(result),
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) if matches!(picker.state, LoadState::Loading) => {
+                picker.finish_loading(Err("history loader stopped".into()));
+            }
+            Err(TryRecvError::Disconnected) => {}
+        }
+
+        screen.draw(&picker, (started.elapsed().as_millis() / 80) as usize)?;
+        if !event::poll(Duration::from_millis(80))? {
+            continue;
+        }
 
         let Event::Key(key) = event::read()? else {
             continue;
@@ -44,34 +62,108 @@ pub fn pick(entries: &[Entry], initial_query: &str) -> Result<Option<Entry>> {
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        match picker.handle_key(key) {
+            Action::Continue => {}
+            Action::Select(entry) => return Ok(entry),
+            Action::Cancel => return Ok(None),
+        }
+    }
+}
+
+enum LoadState {
+    Loading,
+    Ready(Vec<Entry>),
+    Failed(String),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Action {
+    Continue,
+    Select(Option<Entry>),
+    Cancel,
+}
+
+struct Picker {
+    state: LoadState,
+    query: String,
+    selected: usize,
+}
+
+impl Picker {
+    fn new(initial_query: &str) -> Self {
+        Self {
+            state: LoadState::Loading,
+            query: initial_query.to_owned(),
+            selected: 0,
+        }
+    }
+
+    fn finish_loading(&mut self, result: std::result::Result<Vec<Entry>, String>) {
+        self.state = match result {
+            Ok(entries) => LoadState::Ready(sorted(&entries)),
+            Err(error) => LoadState::Failed(error),
+        };
+        self.selected = 0;
+    }
+
+    fn matches(&self) -> Vec<&Entry> {
+        match &self.state {
+            LoadState::Ready(entries) => matching(entries, &self.query),
+            _ => Vec::new(),
+        }
+    }
+
+    fn handle_key(&mut self, key: KeyEvent) -> Action {
+        if matches!(
+            (key.modifiers, key.code),
+            (KeyModifiers::CONTROL, KeyCode::Char('c')) | (_, KeyCode::Esc)
+        ) {
+            return Action::Cancel;
+        }
+        if matches!(self.state, LoadState::Failed(_)) {
+            return Action::Continue;
+        }
+
+        let match_count = self.matches().len();
         match (key.modifiers, key.code) {
-            (KeyModifiers::CONTROL, KeyCode::Char('c')) => return Ok(None),
             (KeyModifiers::CONTROL, KeyCode::Char('u')) => {
-                query.clear();
-                selected = 0;
+                self.query.clear();
+                self.selected = 0;
             }
-            (_, KeyCode::Enter) => return Ok(matches.get(selected).map(|entry| (*entry).clone())),
-            (_, KeyCode::Esc) => return Ok(None),
-            (_, KeyCode::Up) => selected = selected.saturating_sub(1),
-            (_, KeyCode::Down) => {
-                selected = (selected + 1).min(matches.len().saturating_sub(1));
+            (_, KeyCode::Enter) if matches!(self.state, LoadState::Ready(_)) => {
+                return Action::Select(
+                    self.matches()
+                        .get(self.selected)
+                        .map(|entry| (*entry).clone()),
+                );
             }
-            (_, KeyCode::PageUp) => selected = selected.saturating_sub(10),
-            (_, KeyCode::PageDown) => {
-                selected = (selected + 10).min(matches.len().saturating_sub(1));
+            (_, KeyCode::Up) if matches!(self.state, LoadState::Ready(_)) => {
+                self.selected = self.selected.saturating_sub(1);
             }
-            (_, KeyCode::Home) => selected = 0,
-            (_, KeyCode::End) => selected = matches.len().saturating_sub(1),
+            (_, KeyCode::Down) if matches!(self.state, LoadState::Ready(_)) => {
+                self.selected = (self.selected + 1).min(match_count.saturating_sub(1));
+            }
+            (_, KeyCode::PageUp) if matches!(self.state, LoadState::Ready(_)) => {
+                self.selected = self.selected.saturating_sub(10);
+            }
+            (_, KeyCode::PageDown) if matches!(self.state, LoadState::Ready(_)) => {
+                self.selected = (self.selected + 10).min(match_count.saturating_sub(1));
+            }
+            (_, KeyCode::Home) if matches!(self.state, LoadState::Ready(_)) => self.selected = 0,
+            (_, KeyCode::End) if matches!(self.state, LoadState::Ready(_)) => {
+                self.selected = match_count.saturating_sub(1);
+            }
             (_, KeyCode::Backspace) => {
-                query.pop();
-                selected = 0;
+                self.query.pop();
+                self.selected = 0;
             }
             (KeyModifiers::NONE | KeyModifiers::SHIFT, KeyCode::Char(character)) => {
-                query.push(character);
-                selected = 0;
+                self.query.push(character);
+                self.selected = 0;
             }
             _ => {}
         }
+        Action::Continue
     }
 }
 
@@ -130,10 +222,16 @@ impl Screen {
         Ok(Self { terminal })
     }
 
-    fn draw(&mut self, query: &str, matches: &[&Entry], selected: usize) -> Result<()> {
+    fn draw(&mut self, picker: &Picker, spinner: usize) -> Result<()> {
         self.terminal.draw(|frame| {
             let area = frame.area();
             let compact = area.width < 64;
+            let matches = picker.matches();
+            let status = match &picker.state {
+                LoadState::Loading => "loading".to_owned(),
+                LoadState::Failed(_) => "error".to_owned(),
+                LoadState::Ready(_) => format!("{} matches", matches.len()),
+            };
             let [search, results, help] = Layout::vertical([
                 Constraint::Length(1),
                 Constraint::Min(1),
@@ -141,63 +239,86 @@ impl Screen {
             ])
             .areas(area);
 
-            let [input, count] = Layout::horizontal([
-                Constraint::Min(1),
-                Constraint::Length(matches.len().to_string().len() as u16 + 9),
-            ])
-            .areas(search);
+            let [input, count] =
+                Layout::horizontal([Constraint::Min(1), Constraint::Length(status.len() as u16)])
+                    .areas(search);
             frame.render_widget(
                 Paragraph::new(Line::from(vec![
-                    Span::styled("history> ", Style::new().fg(Color::Cyan)),
-                    Span::raw(query),
+                    Span::styled("> ", Style::new().fg(Color::Cyan)),
+                    Span::raw(&picker.query),
                     Span::styled(" ", Style::new().bg(Color::Gray)),
                 ])),
                 input,
             );
             frame.render_widget(
-                Paragraph::new(format!("{} matches", matches.len()))
+                Paragraph::new(status)
                     .alignment(Alignment::Right)
                     .style(Style::new().fg(Color::DarkGray)),
                 count,
             );
 
-            if matches.is_empty() {
-                frame.render_widget(
+            match &picker.state {
+                LoadState::Loading => frame.render_widget(
+                    Paragraph::new(format!(
+                        "{} Loading history...",
+                        ['|', '/', '-', '\\'][spinner % 4]
+                    ))
+                    .alignment(Alignment::Center)
+                    .style(Style::new().fg(Color::DarkGray)),
+                    results,
+                ),
+                LoadState::Failed(error) => frame.render_widget(
+                    Paragraph::new(format!("Failed to load history: {error}"))
+                        .alignment(Alignment::Center)
+                        .style(Style::new().fg(Color::Red)),
+                    results,
+                ),
+                LoadState::Ready(_) if matches.is_empty() => frame.render_widget(
                     Paragraph::new("No matching commands")
                         .alignment(Alignment::Center)
                         .style(Style::new().fg(Color::DarkGray)),
                     results,
-                );
-            } else {
-                let show_time = results.width >= 54;
-                let items = matches.iter().map(|entry| {
-                    let command = entry.command.replace('\n', " ");
-                    let line = if show_time {
-                        Line::from(vec![
-                            Span::styled(
-                                format!("{}  ", entry.display_time),
-                                Style::new().fg(Color::DarkGray),
-                            ),
-                            Span::raw(command),
-                        ])
-                    } else {
-                        Line::raw(command)
-                    };
-                    ListItem::new(line).style(Style::new().fg(Color::White))
-                });
-                let list = List::new(items)
-                    .highlight_symbol("▸ ")
-                    .highlight_style(Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD));
-                let mut state = ListState::default().with_selected(Some(selected));
-                frame.render_stateful_widget(list, results, &mut state);
+                ),
+                LoadState::Ready(_) => {
+                    let show_time = results.width >= 54;
+                    let items = matches.iter().map(|entry| {
+                        let command = entry.command.replace('\n', " ");
+                        let line = if show_time {
+                            Line::from(vec![
+                                Span::styled(
+                                    format!("{}  ", entry.display_time),
+                                    Style::new().fg(Color::DarkGray),
+                                ),
+                                Span::raw(command),
+                            ])
+                        } else {
+                            Line::raw(command)
+                        };
+                        ListItem::new(line).style(Style::new().fg(Color::White))
+                    });
+                    let list = List::new(items)
+                        .highlight_symbol("▸ ")
+                        .highlight_style(Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+                    let mut state = ListState::default().with_selected(Some(picker.selected));
+                    frame.render_stateful_widget(list, results, &mut state);
+                }
             }
 
             let position = if matches.is_empty() {
                 "0/0".to_owned()
             } else {
-                format!("{}/{}", selected + 1, matches.len())
+                format!("{}/{}", picker.selected + 1, matches.len())
             };
-            let help_line = if compact {
+            let help_line = if matches!(picker.state, LoadState::Failed(_)) {
+                Line::from(vec![Span::styled("esc", key_style()), Span::raw(" cancel")])
+            } else if matches!(picker.state, LoadState::Loading) {
+                Line::from(vec![
+                    Span::styled("ctrl-u", key_style()),
+                    Span::raw(" clear  "),
+                    Span::styled("esc", key_style()),
+                    Span::raw(" cancel"),
+                ])
+            } else if compact {
                 Line::from(vec![
                     Span::styled("↑↓", key_style()),
                     Span::raw(" move  "),
@@ -278,6 +399,10 @@ fn with_terminal_stdout<T>(f: impl FnOnce() -> T) -> T {
 mod tests {
     use super::*;
 
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
     fn entry(command: &str, executed_at: i64) -> Entry {
         Entry {
             command: command.into(),
@@ -303,5 +428,30 @@ mod tests {
         );
         assert_eq!(matching(&sorted, "LOG git"), vec![&sorted[1]]);
         assert_eq!(newest_match(&entries, "git"), Some(&entries[2]));
+    }
+
+    #[test]
+    fn edits_query_while_loading_and_ignores_enter() {
+        let mut picker = Picker::new("git");
+
+        assert_eq!(picker.handle_key(key(KeyCode::Char(' '))), Action::Continue);
+        assert_eq!(picker.handle_key(key(KeyCode::Char('l'))), Action::Continue);
+        assert_eq!(picker.query, "git l");
+        assert_eq!(picker.handle_key(key(KeyCode::Enter)), Action::Continue);
+
+        picker.finish_loading(Ok(vec![entry("git status", 20), entry("git log", 10)]));
+        assert_eq!(picker.matches()[0].command, "git log");
+    }
+
+    #[test]
+    fn records_load_failure_and_allows_cancel() {
+        let mut picker = Picker::new("");
+        picker.finish_loading(Err("offline".into()));
+
+        assert!(matches!(
+            &picker.state,
+            LoadState::Failed(error) if error == "offline"
+        ));
+        assert_eq!(picker.handle_key(key(KeyCode::Esc)), Action::Cancel);
     }
 }

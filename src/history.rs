@@ -235,38 +235,25 @@ fn write_nul_delimited(mut output: impl Write, commands: &[String]) -> Result<()
 }
 
 pub async fn pick(query: &str) -> Result<()> {
-    let db = Db::open(true).await?;
-    let sql = format!(
-        "SELECT command, executed_at,
-                strftime('%m-%d %H:%M:%S', executed_at / 1000000000, 'unixepoch', 'localtime')
-         FROM history
-         WHERE cwd = ?1
-           {HIDE_INTERNAL}
-         ORDER BY executed_at DESC
-         LIMIT 1000"
-    );
-    let mut rows = db
-        .conn
-        .query(&sql, params![pwd()?.to_string_lossy()])
-        .await?;
-    let mut entries = Vec::new();
-    while let Some(row) = rows.next().await? {
-        entries.push(tui::Entry {
-            command: row.get(0)?,
-            executed_at: row.get(1)?,
-            display_time: row.get(2)?,
-        });
-    }
-    if entries.is_empty() {
-        return Ok(());
-    }
-
     let Ok(selector) = env::var("TERMINAL_HISTORY_SELECTOR") else {
-        if let Some(entry) = tui::pick(&entries, query)? {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let loader = tokio::spawn(async move {
+            let result = pick_entries().await.map_err(|error| error.to_string());
+            let _ = sender.send(result);
+        });
+        let selected = tokio::task::block_in_place(|| tui::pick(receiver, query));
+        loader.abort();
+        if let Some(entry) = selected? {
             print!("{}", entry.command);
         }
         return Ok(());
     };
+
+    let entries = pick_entries().await?;
+    if entries.is_empty() {
+        return Ok(());
+    }
+
     let Ok(mut child) = ProcessCommand::new(selector)
         .args([
             "--read0",
@@ -303,6 +290,30 @@ pub async fn pick(query: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+async fn pick_entries() -> Result<Vec<tui::Entry>> {
+    let db = Db::open(true).await?;
+    let cwd = pwd()?.to_string_lossy().into_owned();
+    let sql = format!(
+        "SELECT command, executed_at,
+                strftime('%m-%d %H:%M:%S', executed_at / 1000000000, 'unixepoch', 'localtime')
+         FROM history
+         WHERE cwd = ?1
+           {HIDE_INTERNAL}
+         ORDER BY executed_at DESC
+         LIMIT 1000"
+    );
+    let mut rows = db.conn.query(&sql, params![cwd]).await?;
+    let mut entries = Vec::new();
+    while let Some(row) = rows.next().await? {
+        entries.push(tui::Entry {
+            command: row.get(0)?,
+            executed_at: row.get(1)?,
+            display_time: row.get(2)?,
+        });
+    }
+    Ok(entries)
 }
 
 fn escape_like(value: &str) -> String {
